@@ -27,7 +27,7 @@
 //! let client = rshttpx::Client::builder()
 //!     .base_url("https://httpbin.org")
 //!     .follow_redirects(true)
-//!     .build();
+//!     .build()?;
 //!
 //! let resp = client
 //!     .post("/post")
@@ -53,6 +53,7 @@ pub mod cookies;
 mod decode;
 pub mod error;
 pub mod headers;
+mod netrc;
 pub mod request;
 pub mod response;
 pub mod stream;
@@ -61,7 +62,9 @@ pub mod url;
 
 pub use api::{delete, get, head, options, post_json, request};
 pub use auth::{Auth, BasicAuth, BearerAuth, DigestAuth};
-pub use client::{Client, ClientBuilder, Limits, RequestBuilder, Timeout};
+pub use client::{
+    Client, ClientBuilder, Limits, RequestBuilder, RequestHook, ResponseHook, Timeout,
+};
 pub use content::{Content, Multipart, Part};
 pub use cookies::Cookies;
 pub use stream::StreamingResponse;

@@ -15,9 +15,12 @@ idioms allow, built on [`hyper`](https://hyper.rs/) + `tokio` with
 - Basic, Bearer, and **Digest** auth (MD5 / SHA-256, with challenge/response)
 - Transparent response decompression: `gzip`, `deflate`, `br` (Brotli)
 - Streaming responses (`send_stream()` → chunked `bytes_stream()`)
+- Streaming request bodies (`body_stream()`, chunked upload)
 - Cookie jar with domain/path/secure matching
-- Granular `Timeout` (connect + total), connection-pool `Limits`, HTTP(S) proxy (`CONNECT` tunnel)
-- TLS verification toggle (`verify`) for local testing
+- Granular `Timeout` (connect + total), connection-pool `Limits`
+- Proxies: HTTP(S) `CONNECT` tunnel and SOCKS5, plus environment proxies (`trust_env`)
+- TLS: verification toggle (`verify`), custom CA bundle, client certificates (mTLS)
+- Transient-failure retries, `.netrc` credentials, request/response event hooks
 - Response helpers: `.json()`, `.text()` (charset-aware), `.bytes()`, `.elapsed()`,
   `.reason_phrase()`, `.encoding()`, `.cookies()`, `.raise_for_status()`
 
@@ -86,10 +89,11 @@ existing async runtime (use the async `Client` there).
 
 ## Not yet covered
 
-A faithful but not 100% exhaustive port. Still missing vs upstream httpx:
-streaming **request** bodies (request bodies are buffered), event hooks,
-`trust_env`/`.netrc`, custom CA bundles and client certificates (mTLS), SOCKS
-proxies, and automatic transport-level retries.
+A close port. The remaining gaps vs upstream httpx are niche: per-host proxy
+"mounts", pluggable custom transports (httpx's ASGI/WSGI transports have no Rust
+analogue), and content-based charset auto-detection (we use the `Content-Type`
+charset, defaulting to UTF-8). Streamed request bodies are sent once, so they do
+not participate in redirect following or challenge-auth retries (same as httpx).
 
 ## License
 

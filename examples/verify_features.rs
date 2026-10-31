@@ -9,7 +9,7 @@ async fn main() -> rshttpx::Result<()> {
     let client = Client::builder()
         .base_url("https://httpbin.org")
         .follow_redirects(true)
-        .build();
+        .build()?;
 
     // 1. Transparent gzip decompression: /gzip returns gzipped JSON.
     let resp = client.get("/gzip").send().await?;
@@ -45,6 +45,46 @@ async fn main() -> rshttpx::Result<()> {
     let resp = client.get("/get").send().await?;
     println!("elapsed: {:?}", resp.elapsed());
     assert!(resp.elapsed().as_nanos() > 0);
+
+    // 7. Streaming request upload (chunked transfer encoding).
+    let chunks: Vec<std::result::Result<bytes::Bytes, std::io::Error>> = vec![
+        Ok(bytes::Bytes::from("streamed-")),
+        Ok(bytes::Bytes::from("upload")),
+    ];
+    let resp = client
+        .post("/post")
+        .header("content-type", "text/plain")
+        .body_stream(futures_util::stream::iter(chunks))
+        .send()
+        .await?;
+    let json: serde_json::Value = resp.json()?;
+    println!("stream-upload: data={}", json["data"]);
+    assert_eq!(json["data"], "streamed-upload");
+
+    // 8. Event hooks fire on request and response.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let req_count = Arc::new(AtomicUsize::new(0));
+    let resp_count = Arc::new(AtomicUsize::new(0));
+    let rc = req_count.clone();
+    let sc = resp_count.clone();
+    let hooked = Client::builder()
+        .base_url("https://httpbin.org")
+        .on_request(move |_req| {
+            rc.fetch_add(1, Ordering::SeqCst);
+        })
+        .on_response(move |_resp| {
+            sc.fetch_add(1, Ordering::SeqCst);
+        })
+        .build()?;
+    hooked.get("/get").send().await?;
+    println!(
+        "hooks: request={} response={}",
+        req_count.load(Ordering::SeqCst),
+        resp_count.load(Ordering::SeqCst)
+    );
+    assert_eq!(req_count.load(Ordering::SeqCst), 1);
+    assert_eq!(resp_count.load(Ordering::SeqCst), 1);
 
     println!("all async feature checks passed (see `blocking` example for the sync client)");
     Ok(())

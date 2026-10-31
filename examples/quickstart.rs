@@ -9,7 +9,7 @@ async fn main() -> rshttpx::Result<()> {
     let client = Client::builder()
         .base_url("https://httpbin.org")
         .follow_redirects(true)
-        .build();
+        .build()?;
 
     // GET with query params.
     let resp = client

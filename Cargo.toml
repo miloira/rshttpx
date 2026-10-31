@@ -33,6 +33,9 @@ flate2 = "1"
 brotli = "7"
 md5 = "0.7"
 encoding_rs = "0.8"
+webpki-roots = "1"
+rustls-pemfile = "2"
+dirs = "5"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

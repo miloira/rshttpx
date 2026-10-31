@@ -177,6 +177,31 @@ impl ClientBuilder {
         self
     }
 
+    pub fn add_root_certificate_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
+        self.inner = self.inner.add_root_certificate_pem(pem);
+        self
+    }
+
+    pub fn identity_pem(mut self, cert_pem: impl Into<Vec<u8>>, key_pem: impl Into<Vec<u8>>) -> Self {
+        self.inner = self.inner.identity_pem(cert_pem, key_pem);
+        self
+    }
+
+    pub fn retries(mut self, retries: u32) -> Self {
+        self.inner = self.inner.retries(retries);
+        self
+    }
+
+    pub fn trust_env(mut self, trust_env: bool) -> Self {
+        self.inner = self.inner.trust_env(trust_env);
+        self
+    }
+
+    pub fn netrc(mut self, enabled: bool) -> Self {
+        self.inner = self.inner.netrc(enabled);
+        self
+    }
+
     pub fn build(self) -> Result<Client> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -189,7 +214,7 @@ impl ClientBuilder {
                 )
             })?;
         Ok(Client {
-            inner: self.inner.build(),
+            inner: self.inner.build()?,
             rt: Arc::new(rt),
         })
     }
