@@ -46,20 +46,25 @@
 
 pub mod api;
 pub mod auth;
+pub mod blocking;
 pub mod client;
 pub mod content;
 pub mod cookies;
+mod decode;
 pub mod error;
 pub mod headers;
 pub mod request;
 pub mod response;
+pub mod stream;
+mod tls;
 pub mod url;
 
 pub use api::{delete, get, head, options, post_json, request};
-pub use auth::{Auth, BasicAuth, BearerAuth};
-pub use client::{Client, ClientBuilder, RequestBuilder};
+pub use auth::{Auth, BasicAuth, BearerAuth, DigestAuth};
+pub use client::{Client, ClientBuilder, Limits, RequestBuilder, Timeout};
 pub use content::{Content, Multipart, Part};
 pub use cookies::Cookies;
+pub use stream::StreamingResponse;
 pub use error::{Error, ErrorKind, Result};
 pub use headers::Headers;
 pub use request::Request;

@@ -29,6 +29,10 @@ percent-encoding = "2"
 base64 = "0.22"
 mime_guess = "2"
 rand = "0.8"
+flate2 = "1"
+brotli = "7"
+md5 = "0.7"
+encoding_rs = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
