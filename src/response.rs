@@ -121,11 +121,10 @@ impl Response {
         decode::decode_text(self.content_type(), &self.body)
     }
 
-    /// The detected charset/encoding label, matching `response.encoding`.
+    /// The resolved charset/encoding label, matching `response.encoding`
+    /// (header charset, then BOM, then content-based detection).
     pub fn encoding(&self) -> String {
-        self.content_type()
-            .and_then(decode::parse_charset)
-            .unwrap_or_else(|| "utf-8".to_string())
+        decode::resolve_encoding(self.content_type(), &self.body)
     }
 
     /// Deserialize the body as JSON into `T`.

@@ -85,16 +85,41 @@ fn inflate_brotli(data: &[u8]) -> Result<Bytes> {
     Ok(Bytes::from(out))
 }
 
-/// Decode response bytes to text using the charset from a `Content-Type` value,
-/// mirroring httpx's `Response.text`. Defaults to UTF-8 when unspecified.
+/// Decode response bytes to text, mirroring httpx's `Response.text`.
+///
+/// Resolution order, matching httpx's charset handling:
+/// 1. the `charset` from `Content-Type`, if present and recognised;
+/// 2. a Unicode byte-order mark, if present;
+/// 3. content-based detection (via `chardetng`), defaulting to UTF-8.
 pub fn decode_text(content_type: Option<&str>, body: &[u8]) -> String {
-    let charset = content_type
-        .and_then(parse_charset)
-        .unwrap_or_else(|| "utf-8".to_string());
-    let encoding = encoding_rs::Encoding::for_label(charset.as_bytes())
-        .unwrap_or(encoding_rs::UTF_8);
-    let (text, _, _) = encoding.decode(body);
-    text.into_owned()
+    if let Some(label) = content_type.and_then(parse_charset) {
+        if let Some(encoding) = encoding_rs::Encoding::for_label(label.as_bytes()) {
+            return encoding.decode(body).0.into_owned();
+        }
+    }
+    if let Some((encoding, _)) = encoding_rs::Encoding::for_bom(body) {
+        return encoding.decode(body).0.into_owned();
+    }
+    detect_encoding(body).decode(body).0.into_owned()
+}
+
+/// The resolved encoding label for a response, used by `Response::encoding`.
+pub fn resolve_encoding(content_type: Option<&str>, body: &[u8]) -> String {
+    if let Some(label) = content_type.and_then(parse_charset) {
+        if let Some(encoding) = encoding_rs::Encoding::for_label(label.as_bytes()) {
+            return encoding.name().to_ascii_lowercase();
+        }
+    }
+    if let Some((encoding, _)) = encoding_rs::Encoding::for_bom(body) {
+        return encoding.name().to_ascii_lowercase();
+    }
+    detect_encoding(body).name().to_ascii_lowercase()
+}
+
+fn detect_encoding(body: &[u8]) -> &'static encoding_rs::Encoding {
+    let mut detector = chardetng::EncodingDetector::new();
+    detector.feed(body, true);
+    detector.guess(None, true)
 }
 
 /// Extract the `charset` parameter from a `Content-Type` header value.
@@ -106,4 +131,56 @@ pub fn parse_charset(content_type: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uses_header_charset() {
+        // 0xE9 is 'é' in ISO-8859-1 / Windows-1252.
+        let text = decode_text(Some("text/plain; charset=iso-8859-1"), &[0xE9]);
+        assert_eq!(text, "é");
+    }
+
+    #[test]
+    fn strips_utf8_bom() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"hi");
+        let text = decode_text(None, &bytes);
+        assert_eq!(text, "hi");
+    }
+
+    #[test]
+    fn decodes_utf16le_bom() {
+        // UTF-16LE BOM + "AB".
+        let bytes = [0xFF, 0xFE, b'A', 0x00, b'B', 0x00];
+        let text = decode_text(None, &bytes);
+        assert_eq!(text, "AB");
+    }
+
+    #[test]
+    fn detection_defaults_to_ascii_utf8() {
+        let text = decode_text(None, b"plain ascii");
+        assert_eq!(text, "plain ascii");
+    }
+
+    #[test]
+    fn resolve_encoding_reports_header_charset() {
+        assert_eq!(
+            resolve_encoding(Some("text/html; charset=shift_jis"), b"x"),
+            "shift_jis"
+        );
+    }
+
+    #[test]
+    fn gzip_decode_body() {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"payload").unwrap();
+        let compressed = enc.finish().unwrap();
+        let out = decode_body(Some("gzip"), bytes::Bytes::from(compressed)).unwrap();
+        assert_eq!(&out[..], b"payload");
+    }
 }

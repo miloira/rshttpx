@@ -21,6 +21,8 @@ idioms allow, built on [`hyper`](https://hyper.rs/) + `tokio` with
 - Proxies: HTTP(S) `CONNECT` tunnel and SOCKS5, plus environment proxies (`trust_env`)
 - TLS: verification toggle (`verify`), custom CA bundle, client certificates (mTLS)
 - Transient-failure retries, `.netrc` credentials, request/response event hooks
+- Per-host proxy mounts (`mount_proxy`/`mount_direct`) and a pluggable `Transport` trait (for mocks/custom backends)
+- Charset auto-detection for `.text()` (header charset → BOM → content detection)
 - Response helpers: `.json()`, `.text()` (charset-aware), `.bytes()`, `.elapsed()`,
   `.reason_phrase()`, `.encoding()`, `.cookies()`, `.raise_for_status()`
 
@@ -87,13 +89,25 @@ existing async runtime (use the async `Client` there).
 - `cargo run --example verify_features` — gzip/brotli, Digest auth, streaming, elapsed
 - `cargo run --example blocking` — the synchronous client
 
+## Testing
+
+```
+cargo test        # unit + integration (spins up local HTTP/TLS/SOCKS5 servers)
+cargo clippy --all-targets
+```
+
+Integration tests (`tests/integration.rs`, `tests/integration_secure.rs`) cover
+redirects, retries against a flaky server, the mock `Transport`, per-host mount
+routing, TLS with a generated custom CA, mutual TLS (both accept and reject), and
+a SOCKS5 proxy — all against local servers, no network required.
+
 ## Not yet covered
 
-A close port. The remaining gaps vs upstream httpx are niche: per-host proxy
-"mounts", pluggable custom transports (httpx's ASGI/WSGI transports have no Rust
-analogue), and content-based charset auto-detection (we use the `Content-Type`
-charset, defaulting to UTF-8). Streamed request bodies are sent once, so they do
-not participate in redirect following or challenge-auth retries (same as httpx).
+The remaining gaps vs upstream httpx are niche: HTTP/3 (QUIC), and httpx's
+in-process ASGI/WSGI transports (no Rust analogue — the generic `Transport`
+trait covers custom backends instead). Streamed request bodies are sent once, so
+they do not participate in redirect following or challenge-auth retries (same as
+httpx).
 
 ## License
 

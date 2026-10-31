@@ -27,7 +27,142 @@ use crate::netrc::Netrc;
 use crate::request::Request;
 use crate::response::Response;
 use crate::tls::{self, TlsOptions};
+use crate::transport::Transport;
 use crate::url::{QueryParams, Url};
+
+/// A URL pattern for per-host proxy mounts, mirroring httpx mount keys such as
+/// `"all://"`, `"https://"`, `"https://example.com"` and `"all://*.example.com"`.
+#[derive(Clone, Debug)]
+struct Pattern {
+    scheme: Option<String>,
+    host: Option<String>,
+    subdomains: bool,
+}
+
+impl Pattern {
+    fn parse(raw: &str) -> Pattern {
+        let (scheme, rest) = match raw.split_once("://") {
+            Some((s, r)) => {
+                let scheme = if s == "all" || s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_ascii_lowercase())
+                };
+                (scheme, r)
+            }
+            None => (None, raw),
+        };
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return Pattern {
+                scheme,
+                host: None,
+                subdomains: false,
+            };
+        }
+        // Drop any port component for matching purposes.
+        let host_part = rest.split(':').next().unwrap_or(rest);
+        if let Some(suffix) = host_part.strip_prefix("*.") {
+            Pattern {
+                scheme,
+                host: Some(suffix.to_ascii_lowercase()),
+                subdomains: true,
+            }
+        } else {
+            Pattern {
+                scheme,
+                host: Some(host_part.to_ascii_lowercase()),
+                subdomains: false,
+            }
+        }
+    }
+
+    fn matches(&self, url: &Url) -> bool {
+        if let Some(scheme) = &self.scheme {
+            if !url.scheme().eq_ignore_ascii_case(scheme) {
+                return false;
+            }
+        }
+        match &self.host {
+            None => true,
+            Some(host) => {
+                let url_host = url.host().unwrap_or("").to_ascii_lowercase();
+                if self.subdomains {
+                    url_host == *host
+                        || (url_host.ends_with(host)
+                            && url_host.len() > host.len()
+                            && url_host.as_bytes()[url_host.len() - host.len() - 1] == b'.')
+                } else {
+                    url_host == *host
+                }
+            }
+        }
+    }
+}
+
+/// Build a connection pool for an optional proxy using the given TLS config.
+fn build_pool(
+    proxy: Option<&str>,
+    tls_config: rustls::ClientConfig,
+    http2: bool,
+    limits: Limits,
+    connect_timeout: Option<Duration>,
+) -> Pool {
+    let make_http = || {
+        let mut http = HttpConnector::new();
+        http.enforce_http(false);
+        if let Some(c) = connect_timeout {
+            http.set_connect_timeout(Some(c));
+        }
+        http
+    };
+    let make_builder = || {
+        let mut b = HyperClient::builder(TokioExecutor::new());
+        b.pool_max_idle_per_host(limits.max_idle_per_host);
+        b.pool_idle_timeout(limits.idle_timeout);
+        b
+    };
+    let make_https = |tls: rustls::ClientConfig| {
+        hyper_rustls::HttpsConnectorBuilder::new()
+            .with_tls_config(tls)
+            .https_or_http()
+    };
+
+    let proxy_uri = proxy.and_then(|p| p.parse::<http::Uri>().ok());
+    let is_socks = proxy.map(|p| p.starts_with("socks")).unwrap_or(false);
+
+    match proxy_uri {
+        Some(uri) if is_socks => {
+            let socks = SocksV5::new(uri, make_http());
+            let p = make_https(tls_config);
+            let https = if http2 {
+                p.enable_all_versions().wrap_connector(socks)
+            } else {
+                p.enable_http1().wrap_connector(socks)
+            };
+            Pool::Socks(make_builder().build(https))
+        }
+        Some(uri) => {
+            let tunnel = Tunnel::new(uri, make_http());
+            let p = make_https(tls_config);
+            let https = if http2 {
+                p.enable_all_versions().wrap_connector(tunnel)
+            } else {
+                p.enable_http1().wrap_connector(tunnel)
+            };
+            Pool::Tunnel(make_builder().build(https))
+        }
+        None => {
+            let p = make_https(tls_config);
+            let https = if http2 {
+                p.enable_all_versions().wrap_connector(make_http())
+            } else {
+                p.enable_http1().wrap_connector(make_http())
+            };
+            Pool::Direct(make_builder().build(https))
+        }
+    }
+}
 
 /// A hook invoked on each outgoing request before it is sent (httpx
 /// `event_hooks["request"]`). It may mutate the request.
@@ -45,6 +180,23 @@ type ReqBody = BoxBody<Bytes, std::io::Error>;
 /// Wrap buffered bytes as a [`ReqBody`].
 fn buffered_body(bytes: Bytes) -> ReqBody {
     Full::new(bytes).map_err(|e: std::convert::Infallible| match e {}).boxed()
+}
+
+/// Apply transparent decompression to a raw response body per `Content-Encoding`.
+fn finalize_body(
+    status: StatusCode,
+    mut headers: Headers,
+    raw: Bytes,
+) -> Result<(StatusCode, Headers, Bytes)> {
+    let body = if raw.is_empty() {
+        raw
+    } else {
+        let decoded = decode::decode_body(headers.get("content-encoding"), raw)?;
+        headers.remove("content-encoding");
+        headers.remove("content-length");
+        decoded
+    };
+    Ok((status, headers, body))
 }
 
 /// A connection pool: direct, through an HTTP `CONNECT` tunnel, or via SOCKS5.
@@ -134,6 +286,8 @@ struct Config {
     netrc: Option<Arc<Netrc>>,
     on_request: Vec<RequestHook>,
     on_response: Vec<ResponseHook>,
+    mounts: Vec<(Pattern, Pool)>,
+    transport: Option<Arc<dyn Transport>>,
 }
 
 /// An async HTTP client with connection pooling, mirroring `httpx.AsyncClient`.
@@ -331,19 +485,42 @@ impl Client {
         }
     }
 
+    /// Select the connection pool for a URL, honouring per-host proxy mounts.
+    fn pool_for(&self, url: &Url) -> &Pool {
+        for (pattern, pool) in &self.config.mounts {
+            if pattern.matches(url) {
+                return pool;
+            }
+        }
+        &self.inner
+    }
+
+    /// One buffered round trip: via a custom transport if configured, otherwise
+    /// the selected pool. Response decompression is applied uniformly.
     async fn send_once(
         &self,
         request: &Request,
         timeout: Option<Duration>,
     ) -> Result<(StatusCode, Headers, Bytes)> {
-        let body = buffered_body(request.body().clone());
-        self.send_body(request, body, timeout).await
+        let (status, headers, raw) = match &self.config.transport {
+            Some(transport) => {
+                let r = transport.roundtrip(request, timeout).await?;
+                (r.status, r.headers, r.body)
+            }
+            None => {
+                let body = buffered_body(request.body().clone());
+                self.pool_roundtrip(self.pool_for(request.url()), request, body, timeout)
+                    .await?
+            }
+        };
+        finalize_body(status, headers, raw)
     }
 
-    /// Send a request with an explicit body (buffered or streamed), buffering
-    /// and decompressing the response.
-    async fn send_body(
+    /// Send a request through a specific pool and return the raw (undecoded)
+    /// status, headers and body.
+    async fn pool_roundtrip(
         &self,
+        pool: &Pool,
         request: &Request,
         body: ReqBody,
         timeout: Option<Duration>,
@@ -362,7 +539,7 @@ impl Client {
         }
         let http_request = builder.body(body).map_err(Error::from)?;
 
-        let fut = self.inner.request(http_request);
+        let fut = pool.request(http_request);
         let response = match timeout {
             Some(dur) => tokio::time::timeout(dur, fut)
                 .await
@@ -376,26 +553,13 @@ impl Client {
         };
 
         let status = response.status();
-        let mut headers = Headers::from_header_map(response.headers());
-
+        let headers = Headers::from_header_map(response.headers());
         let collected = response
             .into_body()
             .collect()
             .await
             .map_err(|e| Error::with_source(ErrorKind::Transport, e.to_string(), e))?;
-        let raw = collected.to_bytes();
-
-        // Transparently decompress per Content-Encoding.
-        let body = if raw.is_empty() {
-            raw
-        } else {
-            let decoded = decode::decode_body(headers.get("content-encoding"), raw)?;
-            headers.remove("content-encoding");
-            headers.remove("content-length");
-            decoded
-        };
-
-        Ok((status, headers, body))
+        Ok((status, headers, collected.to_bytes()))
     }
 
     /// Send a single request and return a streaming response (no redirect
@@ -421,7 +585,7 @@ impl Client {
             .body(buffered_body(request.body().clone()))
             .map_err(Error::from)?;
 
-        let fut = self.inner.request(http_request);
+        let fut = self.pool_for(request.url()).request(http_request);
         let response = match timeout {
             Some(dur) => tokio::time::timeout(dur, fut)
                 .await
@@ -461,7 +625,9 @@ impl Client {
         for hook in &self.config.on_request {
             hook(&mut request);
         }
-        let (status, headers, bytes) = self.send_body(&request, body, timeout).await?;
+        let pool = self.pool_for(request.url());
+        let (status, headers, raw) = self.pool_roundtrip(pool, &request, body, timeout).await?;
+        let (status, headers, bytes) = finalize_body(status, headers, raw)?;
         self.config.cookies.extract(request.url(), &headers);
         let mut response = Response::new(status, headers, request.url().clone(), bytes);
         for hook in &self.config.on_response {
@@ -506,6 +672,8 @@ pub struct ClientBuilder {
     use_netrc: bool,
     on_request: Vec<RequestHook>,
     on_response: Vec<ResponseHook>,
+    mounts: Vec<(String, Option<String>)>,
+    transport: Option<Arc<dyn Transport>>,
 }
 
 impl ClientBuilder {
@@ -529,6 +697,8 @@ impl ClientBuilder {
             use_netrc: false,
             on_request: Vec::new(),
             on_response: Vec::new(),
+            mounts: Vec::new(),
+            transport: None,
         }
     }
 
@@ -683,6 +853,30 @@ impl ClientBuilder {
         self
     }
 
+    /// Mount a proxy for URLs matching `pattern` (httpx `mounts=`). The pattern
+    /// uses httpx mount syntax: `"all://"`, `"https://"`, `"https://example.com"`,
+    /// or `"all://*.example.com"`. The most specific match wins; mounts are
+    /// tried in the order added. Pass the proxy URL (`http(s)://` or `socks5://`).
+    pub fn mount_proxy(mut self, pattern: impl Into<String>, proxy: impl Into<String>) -> Self {
+        self.mounts.push((pattern.into(), Some(proxy.into())));
+        self
+    }
+
+    /// Mount a direct (no-proxy) connection for URLs matching `pattern`, useful
+    /// for carving out exceptions to a broader proxy mount.
+    pub fn mount_direct(mut self, pattern: impl Into<String>) -> Self {
+        self.mounts.push((pattern.into(), None));
+        self
+    }
+
+    /// Use a custom [`Transport`] for the buffered request path (httpx
+    /// `transport=`), e.g. a mock in tests. Response streaming and streaming
+    /// uploads still use the built-in pool.
+    pub fn transport(mut self, transport: Arc<dyn Transport>) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
     /// Build the client. Returns an error if a custom CA bundle or client
     /// identity PEM is invalid.
     pub fn build(self) -> Result<Client> {
@@ -696,27 +890,10 @@ impl ClientBuilder {
         let tls_config = tls::build_config(&tls_options)?;
 
         let http2 = self.http2;
-        let make_http = || {
-            let mut http = HttpConnector::new();
-            http.enforce_http(false);
-            if let Some(connect) = self.timeout.connect {
-                http.set_connect_timeout(Some(connect));
-            }
-            http
-        };
-        let make_builder = || {
-            let mut b = HyperClient::builder(TokioExecutor::new());
-            b.pool_max_idle_per_host(self.limits.max_idle_per_host);
-            b.pool_idle_timeout(self.limits.idle_timeout);
-            b
-        };
-        let make_https = |tls: rustls::ClientConfig| {
-            hyper_rustls::HttpsConnectorBuilder::new()
-                .with_tls_config(tls)
-                .https_or_http()
-        };
+        let connect_timeout = self.timeout.connect;
+        let limits = self.limits;
 
-        // Resolve the effective proxy: explicit, else environment (trust_env).
+        // Resolve the effective default proxy: explicit, else environment.
         let proxy = self.proxy.clone().or_else(|| {
             if self.trust_env {
                 std::env::var("HTTPS_PROXY")
@@ -730,43 +907,29 @@ impl ClientBuilder {
                 None
             }
         });
-        let proxy_uri = proxy.as_deref().and_then(|p| p.parse::<http::Uri>().ok());
-        let is_socks = proxy
-            .as_deref()
-            .map(|p| p.starts_with("socks"))
-            .unwrap_or(false);
 
-        let inner = match proxy_uri {
-            Some(uri) if is_socks => {
-                let socks = SocksV5::new(uri, make_http());
-                let p = make_https(tls_config);
-                let https = if http2 {
-                    p.enable_all_versions().wrap_connector(socks)
-                } else {
-                    p.enable_http1().wrap_connector(socks)
-                };
-                Pool::Socks(make_builder().build(https))
-            }
-            Some(uri) => {
-                let tunnel = Tunnel::new(uri, make_http());
-                let p = make_https(tls_config);
-                let https = if http2 {
-                    p.enable_all_versions().wrap_connector(tunnel)
-                } else {
-                    p.enable_http1().wrap_connector(tunnel)
-                };
-                Pool::Tunnel(make_builder().build(https))
-            }
-            None => {
-                let p = make_https(tls_config);
-                let https = if http2 {
-                    p.enable_all_versions().wrap_connector(make_http())
-                } else {
-                    p.enable_http1().wrap_connector(make_http())
-                };
-                Pool::Direct(make_builder().build(https))
-            }
-        };
+        let inner = build_pool(
+            proxy.as_deref(),
+            tls_config.clone(),
+            http2,
+            limits,
+            connect_timeout,
+        );
+
+        let mounts: Vec<(Pattern, Pool)> = self
+            .mounts
+            .iter()
+            .map(|(pattern, proxy)| {
+                let pool = build_pool(
+                    proxy.as_deref(),
+                    tls_config.clone(),
+                    http2,
+                    limits,
+                    connect_timeout,
+                );
+                (Pattern::parse(pattern), pool)
+            })
+            .collect();
 
         let mut headers = Headers::new();
         headers.insert("user-agent", concat!("rshttpx/", env!("CARGO_PKG_VERSION")));
@@ -798,6 +961,8 @@ impl ClientBuilder {
             netrc,
             on_request: self.on_request,
             on_response: self.on_response,
+            mounts,
+            transport: self.transport,
         };
 
         Ok(Client {

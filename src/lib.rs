@@ -58,6 +58,7 @@ pub mod request;
 pub mod response;
 pub mod stream;
 mod tls;
+pub mod transport;
 pub mod url;
 
 pub use api::{delete, get, head, options, post_json, request};
@@ -68,6 +69,7 @@ pub use client::{
 pub use content::{Content, Multipart, Part};
 pub use cookies::Cookies;
 pub use stream::StreamingResponse;
+pub use transport::{Transport, TransportResponse};
 pub use error::{Error, ErrorKind, Result};
 pub use headers::Headers;
 pub use request::Request;
