@@ -1,0 +1,34 @@
+[package]
+name = "rshttpx"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "A Rust port of Python's httpx: a next-generation async HTTP client."
+license = "BSD-3-Clause"
+readme = "README.md"
+repository = "https://github.com/rshttpx/rshttpx"
+keywords = ["http", "client", "async", "httpx", "hyper"]
+categories = ["web-programming::http-client", "asynchronous"]
+
+[dependencies]
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "http2", "tls12", "webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+http = "1"
+http-body-util = "0.1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "sync"] }
+bytes = "1"
+futures-core = "0.3"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+url = "2"
+percent-encoding = "2"
+base64 = "0.22"
+mime_guess = "2"
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
