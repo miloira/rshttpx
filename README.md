@@ -22,9 +22,12 @@ idioms allow, built on [`hyper`](https://hyper.rs/) + `tokio` with
 - TLS: verification toggle (`verify`), custom CA bundle, client certificates (mTLS)
 - Transient-failure retries, `.netrc` credentials, request/response event hooks
 - Per-host proxy mounts (`mount_proxy`/`mount_direct`) and a pluggable `Transport` trait (for mocks/custom backends)
-- Charset auto-detection for `.text()` (header charset → BOM → content detection)
-- Response helpers: `.json()`, `.text()` (charset-aware), `.bytes()`, `.elapsed()`,
-  `.reason_phrase()`, `.encoding()`, `.cookies()`, `.raise_for_status()`
+- Charset auto-detection for `.text()` (header charset → BOM → content detection), with a `default_encoding` override
+- Connection-pool `Limits` incl. `max_connections` (concurrency gate), initial client cookies
+- Rich `Url`: `copy_with`-style `with_scheme/host/port/path/fragment`, `copy_set_param`, `userinfo`, `is_absolute_url`
+- Response helpers: `.json()`, `.text()`, `.bytes()`, `.elapsed()`, `.reason_phrase()`,
+  `.encoding()`, `.cookies()`, `.links()`, `.request()`, `.num_bytes_downloaded()`, `.raise_for_status()`
+- Streaming response helpers: `.chunk()`, `.bytes_stream()`, `.text()`, `.json()`, `.lines()`
 
 ## API mapping
 
@@ -101,13 +104,14 @@ redirects, retries against a flaky server, the mock `Transport`, per-host mount
 routing, TLS with a generated custom CA, mutual TLS (both accept and reject), and
 a SOCKS5 proxy — all against local servers, no network required.
 
-## Not yet covered
+## Parity notes
 
-The remaining gaps vs upstream httpx are niche: HTTP/3 (QUIC), and httpx's
-in-process ASGI/WSGI transports (no Rust analogue — the generic `Transport`
-trait covers custom backends instead). Streamed request bodies are sent once, so
-they do not participate in redirect following or challenge-auth retries (same as
-httpx).
+This aims for functional parity with httpx (which itself supports HTTP/1.1 and
+HTTP/2 only — there is no HTTP/3 in httpx). The one Python-specific feature
+without a direct port is httpx's in-process ASGI/WSGI transports; the generic
+[`Transport`](src/transport.rs) trait is the Rust analogue for custom backends
+and mocks. Streamed request bodies are sent once, so they do not participate in
+redirect following or challenge-auth retries (same constraint as httpx).
 
 ## License
 

@@ -73,7 +73,7 @@ pub use transport::{Transport, TransportResponse};
 pub use error::{Error, ErrorKind, Result};
 pub use headers::Headers;
 pub use request::Request;
-pub use response::Response;
+pub use response::{Link, Response};
 pub use url::{QueryParams, Url};
 
 // Re-export commonly-used types from the `http` crate so users do not need to

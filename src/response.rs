@@ -9,7 +9,19 @@ use serde::de::DeserializeOwned;
 use crate::decode;
 use crate::error::{Error, ErrorKind, Result};
 use crate::headers::Headers;
+use crate::request::Request;
 use crate::url::Url;
+
+/// A `Link` header entry, as returned by [`Response::links`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    /// The target URL.
+    pub url: String,
+    /// The `rel` relation type, if present.
+    pub rel: Option<String>,
+    /// Any other parameters on the link (e.g. `title`, `type`).
+    pub params: Vec<(String, String)>,
+}
 
 /// A received HTTP response with a fully-buffered, already-decompressed body.
 ///
@@ -24,6 +36,8 @@ pub struct Response {
     body: Bytes,
     history: Vec<Url>,
     elapsed: Duration,
+    request: Option<Request>,
+    default_encoding: Option<String>,
 }
 
 impl Response {
@@ -35,6 +49,8 @@ impl Response {
             body,
             history: Vec::new(),
             elapsed: Duration::ZERO,
+            request: None,
+            default_encoding: None,
         }
     }
 
@@ -44,6 +60,14 @@ impl Response {
 
     pub(crate) fn set_elapsed(&mut self, elapsed: Duration) {
         self.elapsed = elapsed;
+    }
+
+    pub(crate) fn set_request(&mut self, request: Request) {
+        self.request = Some(request);
+    }
+
+    pub(crate) fn set_default_encoding(&mut self, encoding: Option<String>) {
+        self.default_encoding = encoding;
     }
 
     /// The HTTP status code.
@@ -115,10 +139,36 @@ impl Response {
         self.body
     }
 
-    /// Decode the body as text, honouring the `charset` in `Content-Type`
-    /// (defaulting to UTF-8), matching `response.text`.
+    /// Decode the body as text. If a `default_encoding` was configured on the
+    /// client it takes precedence; otherwise the `Content-Type` charset is used,
+    /// then a BOM, then content-based detection. Matches `response.text`.
     pub fn text(&self) -> String {
+        if let Some(label) = &self.default_encoding {
+            let content_type = format!("x; charset={label}");
+            return decode::decode_text(Some(&content_type), &self.body);
+        }
         decode::decode_text(self.content_type(), &self.body)
+    }
+
+    /// The request that produced this response (the final one after redirects),
+    /// matching `response.request`.
+    pub fn request(&self) -> Option<&Request> {
+        self.request.as_ref()
+    }
+
+    /// Number of bytes in the (decompressed) body, matching
+    /// `response.num_bytes_downloaded`.
+    pub fn num_bytes_downloaded(&self) -> usize {
+        self.body.len()
+    }
+
+    /// Parsed `Link` header entries, matching `response.links`.
+    pub fn links(&self) -> Vec<Link> {
+        let mut links = Vec::new();
+        for header in self.headers.get_all("link") {
+            links.extend(parse_link_header(header));
+        }
+        links
     }
 
     /// The resolved charset/encoding label, matching `response.encoding`
@@ -162,5 +212,107 @@ impl Response {
         } else {
             Ok(self)
         }
+    }
+}
+
+/// Parse a single `Link` header value (which may contain several links).
+fn parse_link_header(header: &str) -> Vec<Link> {
+    let mut links = Vec::new();
+    // Split on commas that separate links (each link begins with `<`).
+    for segment in split_links(header) {
+        let segment = segment.trim();
+        let Some(end) = segment.find('>') else {
+            continue;
+        };
+        if !segment.starts_with('<') {
+            continue;
+        }
+        let url = segment[1..end].trim().to_string();
+        let mut rel = None;
+        let mut params = Vec::new();
+        for part in segment[end + 1..].split(';') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            if let Some((key, value)) = part.split_once('=') {
+                let key = key.trim().to_string();
+                let value = value.trim().trim_matches('"').to_string();
+                if key.eq_ignore_ascii_case("rel") {
+                    rel = Some(value);
+                } else {
+                    params.push((key, value));
+                }
+            }
+        }
+        links.push(Link { url, rel, params });
+    }
+    links
+}
+
+/// Split a `Link` header into individual links, respecting the `<...>` URL
+/// brackets so commas inside a URL do not split it.
+fn split_links(header: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_brackets = false;
+    for ch in header.chars() {
+        match ch {
+            '<' => {
+                in_brackets = true;
+                current.push(ch);
+            }
+            '>' => {
+                in_brackets = false;
+                current.push(ch);
+            }
+            ',' if !in_brackets => {
+                out.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resp_with_link(value: &str) -> Response {
+        let mut headers = Headers::new();
+        headers.insert("link", value);
+        Response::new(
+            StatusCode::OK,
+            headers,
+            Url::parse("https://example.com/").unwrap(),
+            Bytes::new(),
+        )
+    }
+
+    #[test]
+    fn parses_link_header() {
+        let resp = resp_with_link(
+            "<https://api.test/next>; rel=\"next\", <https://api.test/last>; rel=\"last\"",
+        );
+        let links = resp.links();
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].url, "https://api.test/next");
+        assert_eq!(links[0].rel.as_deref(), Some("next"));
+        assert_eq!(links[1].rel.as_deref(), Some("last"));
+    }
+
+    #[test]
+    fn num_bytes_downloaded_counts_body() {
+        let resp = Response::new(
+            StatusCode::OK,
+            Headers::new(),
+            Url::parse("https://example.com/").unwrap(),
+            Bytes::from_static(b"12345"),
+        );
+        assert_eq!(resp.num_bytes_downloaded(), 5);
     }
 }

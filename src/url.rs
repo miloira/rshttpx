@@ -229,6 +229,74 @@ impl Url {
     pub fn as_str(&self) -> &str {
         self.inner.as_str()
     }
+
+    /// The `user[:password]` portion, matching `httpx.URL.userinfo`.
+    pub fn userinfo(&self) -> String {
+        match (self.username(), self.password()) {
+            ("", None) => String::new(),
+            (user, None) => user.to_string(),
+            (user, Some(pw)) => format!("{user}:{pw}"),
+        }
+    }
+
+    /// Whether this URL has a scheme and host, matching `URL.is_absolute_url`.
+    pub fn is_absolute_url(&self) -> bool {
+        !self.inner.cannot_be_a_base() && self.host().is_some()
+    }
+
+    /// The inverse of [`Url::is_absolute_url`].
+    pub fn is_relative_url(&self) -> bool {
+        !self.is_absolute_url()
+    }
+
+    /// Return a copy with the scheme replaced (httpx `copy_with(scheme=...)`).
+    pub fn with_scheme(&self, scheme: &str) -> Result<Url> {
+        let mut inner = self.inner.clone();
+        inner
+            .set_scheme(scheme)
+            .map_err(|_| Error::invalid_url(format!("invalid scheme: {scheme}")))?;
+        Ok(Url { inner })
+    }
+
+    /// Return a copy with the host replaced.
+    pub fn with_host(&self, host: &str) -> Result<Url> {
+        let mut inner = self.inner.clone();
+        inner
+            .set_host(Some(host))
+            .map_err(|e| Error::invalid_url(format!("invalid host {host:?}: {e}")))?;
+        Ok(Url { inner })
+    }
+
+    /// Return a copy with the port replaced (`None` clears an explicit port).
+    pub fn with_port(&self, port: Option<u16>) -> Result<Url> {
+        let mut inner = self.inner.clone();
+        inner
+            .set_port(port)
+            .map_err(|_| Error::invalid_url("cannot set port on this URL"))?;
+        Ok(Url { inner })
+    }
+
+    /// Return a copy with the path replaced.
+    pub fn with_path(&self, path: &str) -> Url {
+        let mut inner = self.inner.clone();
+        inner.set_path(path);
+        Url { inner }
+    }
+
+    /// Return a copy with the fragment replaced (`None` clears it).
+    pub fn with_fragment(&self, fragment: Option<&str>) -> Url {
+        let mut inner = self.inner.clone();
+        inner.set_fragment(fragment);
+        Url { inner }
+    }
+
+    /// Return a copy with a single query parameter set (replacing existing
+    /// values for that key), matching `URL.copy_set_param`.
+    pub fn copy_set_param(&self, key: &str, value: &str) -> Url {
+        let mut params = self.params();
+        params.set(key, value);
+        self.with_params(&params)
+    }
 }
 
 impl FromStr for Url {

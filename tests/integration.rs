@@ -238,6 +238,78 @@ async fn mount_direct_overrides_broken_default_proxy() {
 }
 
 #[tokio::test]
+async fn streaming_response_text_and_lines() {
+    use futures_util::StreamExt;
+    let addr = spawn_http_server().await;
+    let client = Client::new();
+
+    let stream = client
+        .get(&format!("http://{addr}/hello"))
+        .send_stream()
+        .await
+        .unwrap();
+    assert_eq!(stream.text().await.unwrap(), "hello world");
+
+    // lines() over the same body split correctly (single line here).
+    let stream = client
+        .get(&format!("http://{addr}/hello"))
+        .send_stream()
+        .await
+        .unwrap();
+    let mut lines = Box::pin(stream.lines());
+    let mut collected = Vec::new();
+    while let Some(line) = lines.next().await {
+        collected.push(line.unwrap());
+    }
+    assert_eq!(collected, vec!["hello world".to_string()]);
+}
+
+#[tokio::test]
+async fn response_request_reference_and_num_bytes() {
+    let addr = spawn_http_server().await;
+    let client = Client::new();
+    let resp = client
+        .get(&format!("http://{addr}/hello"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.num_bytes_downloaded(), "hello world".len());
+    assert_eq!(resp.request().unwrap().method(), &Method::GET);
+    assert_eq!(resp.request().unwrap().url().path(), "/hello");
+}
+
+#[tokio::test]
+async fn default_encoding_overrides_detection() {
+    // Mock a latin-1 body with no charset; force the client default encoding.
+    struct Latin1;
+    impl Transport for Latin1 {
+        fn roundtrip<'a>(
+            &'a self,
+            _request: &'a Request,
+            _timeout: Option<Duration>,
+        ) -> TransportFuture<'a> {
+            Box::pin(async move {
+                let mut headers = Headers::new();
+                headers.insert("content-type", "text/plain");
+                // 0xE9 == 'é' in ISO-8859-1.
+                Ok(TransportResponse::new(
+                    StatusCode::OK,
+                    headers,
+                    Bytes::from_static(&[0xE9]),
+                ))
+            })
+        }
+    }
+    let client = Client::builder()
+        .transport(Arc::new(Latin1))
+        .default_encoding("iso-8859-1")
+        .build()
+        .unwrap();
+    let resp = client.get("https://x.test/").send().await.unwrap();
+    assert_eq!(resp.text(), "é");
+}
+
+#[tokio::test]
 async fn custom_transport_intercepts_requests() {
     let transport = Arc::new(MockTransport {
         body: Bytes::from(r#"{"mocked":true}"#),

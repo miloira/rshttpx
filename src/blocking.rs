@@ -202,6 +202,32 @@ impl ClientBuilder {
         self
     }
 
+    pub fn default_encoding(mut self, encoding: impl Into<String>) -> Self {
+        self.inner = self.inner.default_encoding(encoding);
+        self
+    }
+
+    pub fn cookie(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+        domain: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Self {
+        self.inner = self.inner.cookie(name, value, domain, path);
+        self
+    }
+
+    pub fn mount_proxy(mut self, pattern: impl Into<String>, proxy: impl Into<String>) -> Self {
+        self.inner = self.inner.mount_proxy(pattern, proxy);
+        self
+    }
+
+    pub fn mount_direct(mut self, pattern: impl Into<String>) -> Self {
+        self.inner = self.inner.mount_direct(pattern);
+        self
+    }
+
     pub fn build(self) -> Result<Client> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

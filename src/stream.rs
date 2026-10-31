@@ -8,8 +8,10 @@
 
 use bytes::Bytes;
 use futures_core::Stream;
+use futures_util::StreamExt;
 use http::StatusCode;
 use http_body_util::BodyExt;
+use serde::de::DeserializeOwned;
 
 use crate::error::{Error, ErrorKind, Result};
 use crate::headers::Headers;
@@ -96,5 +98,53 @@ impl StreamingResponse {
             .await
             .map_err(|e| Error::with_source(ErrorKind::Transport, e.to_string(), e))?;
         Ok(collected.to_bytes())
+    }
+
+    /// Collect the remaining body and decode it as text (charset-aware),
+    /// matching httpx's `response.aread()` + `.text`.
+    pub async fn text(self) -> Result<String> {
+        let content_type = self.headers.get("content-type").map(str::to_string);
+        let bytes = self.bytes().await?;
+        Ok(crate::decode::decode_text(content_type.as_deref(), &bytes))
+    }
+
+    /// Collect the remaining body and deserialize it as JSON.
+    pub async fn json<T: DeserializeOwned>(self) -> Result<T> {
+        let bytes = self.bytes().await?;
+        serde_json::from_slice(&bytes).map_err(Error::from)
+    }
+
+    /// Stream the body as decoded text lines (newline-delimited), matching
+    /// httpx's `response.aiter_lines()`. Trailing `\r\n`/`\n` are stripped.
+    pub fn lines(self) -> impl Stream<Item = Result<String>> {
+        let stream = Box::pin(self.bytes_stream());
+        futures_util::stream::unfold(
+            (stream, Vec::<u8>::new(), false),
+            |(mut stream, mut buffer, mut finished)| async move {
+                loop {
+                    if let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+                        let mut line: Vec<u8> = buffer.drain(..=pos).collect();
+                        line.pop(); // trailing '\n'
+                        if line.last() == Some(&b'\r') {
+                            line.pop();
+                        }
+                        let text = String::from_utf8_lossy(&line).into_owned();
+                        return Some((Ok(text), (stream, buffer, finished)));
+                    }
+                    if finished {
+                        if buffer.is_empty() {
+                            return None;
+                        }
+                        let text = String::from_utf8_lossy(&buffer).into_owned();
+                        return Some((Ok(text), (stream, Vec::new(), true)));
+                    }
+                    match stream.next().await {
+                        Some(Ok(chunk)) => buffer.extend_from_slice(&chunk),
+                        Some(Err(e)) => return Some((Err(e), (stream, buffer, true))),
+                        None => finished = true,
+                    }
+                }
+            },
+        )
     }
 }

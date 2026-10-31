@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
+use tokio::sync::Semaphore;
+
 use bytes::Bytes;
 use futures_core::Stream;
 use futures_util::TryStreamExt;
@@ -261,13 +263,18 @@ impl Default for Timeout {
 /// Connection-pool limits, mirroring `httpx.Limits`.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
+    /// Maximum number of concurrent in-flight requests (`0` means unlimited).
+    pub max_connections: usize,
+    /// Maximum idle (keep-alive) connections retained per host.
     pub max_idle_per_host: usize,
+    /// How long an idle keep-alive connection is kept before being dropped.
     pub idle_timeout: Option<Duration>,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Limits {
+            max_connections: 100,
             max_idle_per_host: 10,
             idle_timeout: Some(Duration::from_secs(90)),
         }
@@ -288,6 +295,8 @@ struct Config {
     on_response: Vec<ResponseHook>,
     mounts: Vec<(Pattern, Pool)>,
     transport: Option<Arc<dyn Transport>>,
+    semaphore: Arc<Semaphore>,
+    default_encoding: Option<String>,
 }
 
 /// An async HTTP client with connection pooling, mirroring `httpx.AsyncClient`.
@@ -400,6 +409,8 @@ impl Client {
             if !(follow_redirects && is_redirect) {
                 response.set_history(history);
                 response.set_elapsed(start.elapsed());
+                response.set_request(request.clone());
+                response.set_default_encoding(self.config.default_encoding.clone());
                 return Ok(response);
             }
 
@@ -539,6 +550,13 @@ impl Client {
         }
         let http_request = builder.body(body).map_err(Error::from)?;
 
+        let _permit = self
+            .config
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|_| Error::new(ErrorKind::Transport, "connection pool closed"))?;
+
         let fut = pool.request(http_request);
         let response = match timeout {
             Some(dur) => tokio::time::timeout(dur, fut)
@@ -634,6 +652,8 @@ impl Client {
             hook(&response);
         }
         response.set_elapsed(start.elapsed());
+        response.set_request(request.clone());
+        response.set_default_encoding(self.config.default_encoding.clone());
         Ok(response)
     }
 }
@@ -665,7 +685,7 @@ pub struct ClientBuilder {
     extra_ca_pem: Vec<Vec<u8>>,
     identity_pem: Option<(Vec<u8>, Vec<u8>)>,
     limits: Limits,
-    default_encoding: bool,
+    decompress_enabled: bool,
     proxy: Option<String>,
     retries: u32,
     trust_env: bool,
@@ -674,6 +694,8 @@ pub struct ClientBuilder {
     on_response: Vec<ResponseHook>,
     mounts: Vec<(String, Option<String>)>,
     transport: Option<Arc<dyn Transport>>,
+    cookies: Vec<(String, String, String, String)>,
+    default_encoding: Option<String>,
 }
 
 impl ClientBuilder {
@@ -690,7 +712,7 @@ impl ClientBuilder {
             extra_ca_pem: Vec::new(),
             identity_pem: None,
             limits: Limits::default(),
-            default_encoding: true,
+            decompress_enabled: true,
             proxy: None,
             retries: 0,
             trust_env: true,
@@ -699,6 +721,8 @@ impl ClientBuilder {
             on_response: Vec::new(),
             mounts: Vec::new(),
             transport: None,
+            cookies: Vec::new(),
+            default_encoding: None,
         }
     }
 
@@ -784,7 +808,7 @@ impl ClientBuilder {
     /// When `true` (default), advertise `Accept-Encoding: gzip, deflate, br`
     /// and transparently decompress responses.
     pub fn decompress(mut self, enabled: bool) -> Self {
-        self.default_encoding = enabled;
+        self.decompress_enabled = enabled;
         self
     }
 
@@ -877,6 +901,26 @@ impl ClientBuilder {
         self
     }
 
+    /// Seed the cookie jar with an initial cookie (httpx `cookies=`).
+    pub fn cookie(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+        domain: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Self {
+        self.cookies
+            .push((name.into(), value.into(), domain.into(), path.into()));
+        self
+    }
+
+    /// Force a default text encoding for `Response::text` (httpx
+    /// `default_encoding`). When set, it overrides charset detection.
+    pub fn default_encoding(mut self, encoding: impl Into<String>) -> Self {
+        self.default_encoding = Some(encoding.into());
+        self
+    }
+
     /// Build the client. Returns an error if a custom CA bundle or client
     /// identity PEM is invalid.
     pub fn build(self) -> Result<Client> {
@@ -934,7 +978,7 @@ impl ClientBuilder {
         let mut headers = Headers::new();
         headers.insert("user-agent", concat!("rshttpx/", env!("CARGO_PKG_VERSION")));
         headers.insert("accept", "*/*");
-        if self.default_encoding {
+        if self.decompress_enabled {
             headers.insert("accept-encoding", decode::DEFAULT_ACCEPT_ENCODING);
         } else {
             headers.insert("accept-encoding", "identity");
@@ -949,11 +993,23 @@ impl ClientBuilder {
             None
         };
 
+        let cookies = Cookies::new();
+        for (name, value, domain, path) in &self.cookies {
+            cookies.set(name.clone(), value.clone(), domain.clone(), path.clone());
+        }
+
+        let permits = if self.limits.max_connections == 0 {
+            Semaphore::MAX_PERMITS
+        } else {
+            self.limits.max_connections
+        };
+        let semaphore = Arc::new(Semaphore::new(permits));
+
         let config = Config {
             base_url,
             headers,
             auth: self.auth,
-            cookies: Cookies::new(),
+            cookies,
             timeout: self.timeout,
             follow_redirects: self.follow_redirects,
             max_redirects: self.max_redirects,
@@ -963,6 +1019,8 @@ impl ClientBuilder {
             on_response: self.on_response,
             mounts,
             transport: self.transport,
+            semaphore,
+            default_encoding: self.default_encoding,
         };
 
         Ok(Client {

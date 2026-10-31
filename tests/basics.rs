@@ -27,6 +27,27 @@ fn url_default_port_and_authority() {
 }
 
 #[test]
+fn url_copy_with_and_predicates() {
+    let url = Url::parse("https://user:pw@example.com:8443/a?x=1").unwrap();
+    assert!(url.is_absolute_url());
+    assert!(!url.is_relative_url());
+    assert_eq!(url.userinfo(), "user:pw");
+
+    let changed = url.with_path("/b").with_fragment(Some("frag"));
+    assert_eq!(changed.path(), "/b");
+    assert_eq!(changed.fragment(), Some("frag"));
+
+    let rescheme = url.with_scheme("http").unwrap();
+    assert_eq!(rescheme.scheme(), "http");
+
+    let report = url.with_port(Some(9000)).unwrap();
+    assert_eq!(report.port(), Some(9000));
+
+    let reparam = url.copy_set_param("x", "2");
+    assert_eq!(reparam.params().get("x"), Some("2"));
+}
+
+#[test]
 fn url_join_relative() {
     let base = Url::parse("https://example.com/api/v1/").unwrap();
     let joined = base.join("users?page=2").unwrap();

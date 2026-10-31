@@ -75,6 +75,10 @@ impl Error {
     pub(crate) fn invalid_request(msg: impl Into<String>) -> Self {
         Error::new(ErrorKind::InvalidRequest, msg)
     }
+
+    pub(crate) fn invalid_url(msg: impl Into<String>) -> Self {
+        Error::new(ErrorKind::InvalidUrl, msg)
+    }
 }
 
 impl fmt::Display for Error {
