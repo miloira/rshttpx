@@ -86,6 +86,12 @@ println!("{}", resp.status_code());
 The blocking client owns its own runtime; do not call it from inside an
 existing async runtime (use the async `Client` there).
 
+## Documentation
+
+See the full [usage guide](docs/USAGE.md) for client configuration, request
+bodies, auth, proxies, TLS, streaming, the blocking client, custom transports,
+and an httpx ↔ rshttpx cheatsheet.
+
 ## Examples
 
 - `cargo run --example quickstart` — basic GET/POST
